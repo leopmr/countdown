@@ -14,6 +14,22 @@ avant de brancher un modèle, comme prévu en semaine 1 jours 1-4.
 """
 
 import random
+"""
+Point de départ du projet Countdown x GRPO.
+
+Contenu :
+1. Génération de puzzles Countdown (nombres + cible)
+2. Template de prompt avec balises <think>/<answer>
+3. Reward function de format (respecte la structure demandée)
+4. Reward function de correction (l'expression évalue-t-elle à la cible,
+   en utilisant uniquement les nombres fournis, chacun au plus une fois)
+
+Ce fichier ne fait pas encore l'entraînement (ça viendra avec TRL
+GRPOTrainer), c'est la brique de données + reward à valider isolément
+avant de brancher un modèle, comme prévu en semaine 1 jours 1-4.
+"""
+
+import random
 import re
 import itertools
 import operator
@@ -115,20 +131,17 @@ THINK_ANSWER_RE = re.compile(
 def reward_format(completion: str) -> float:
     """1.0 si la structure <think>...</think><answer>...</answer> apparaît
     quelque part dans la complétion, 0.0 sinon. Version assouplie : on
-    utilise .search() au lieu de .match(), donc du texte avant <think>
-    ou après </answer> ne fait plus échouer le format, contrairement à
-    la version stricte initiale. Le compromis : un peu plus de tolérance
-    sur du bruit autour, au risque d'un signal moins pur, à surveiller
-    si le modèle se met à générer du texte inutile juste pour gonfler la
-    longueur sans que ça soit pénalisé."""
-    return 1.0 if THINK_ANSWER_RE.search(completion.strip()) else 0.0
+    cherche toutes les occurrences et on ne s'intéresse qu'à la dernière
+    (la conclusion du modèle), pour rester robuste si le modèle répète
+    la structure plusieurs fois dans une même génération."""
+    return 1.0 if list(THINK_ANSWER_RE.finditer(completion.strip())) else 0.0
 
 
 def extract_answer(completion: str):
-    match = THINK_ANSWER_RE.search(completion.strip())
-    if match is None:
+    matches = list(THINK_ANSWER_RE.finditer(completion.strip()))
+    if not matches:
         return None
-    return match.group(1).strip()
+    return matches[-1].group(1).strip()
 
 
 # ---------------------------------------------------------------------------
