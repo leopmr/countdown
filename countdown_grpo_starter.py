@@ -71,12 +71,12 @@ def generate_dataset(n_puzzles=1000, n_numbers=4, seed=0):
 PROMPT_TEMPLATE = """Tu résous des puzzles Countdown : à partir d'une liste de nombres, \
 trouve une expression arithmétique (+, -, *, /) qui donne exactement le nombre cible. \
 Chaque nombre ne peut être utilisé qu'une seule fois.
- 
+
 Réfléchis d'abord dans des balises <think></think>, puis donne ton expression \
 finale dans des balises <answer></answer>, sans rien écrire après.
- 
+
 Voici deux exemples résolus :
- 
+
 Nombres : [3, 7, 2], cible : 17
 <think>
 J'essaie 7 * 2 = 14, il me reste 3, 14 + 3 = 17. Ça marche.
@@ -84,7 +84,7 @@ J'essaie 7 * 2 = 14, il me reste 3, 14 + 3 = 17. Ça marche.
 <answer>
 7 * 2 + 3
 </answer>
- 
+
 Nombres : [10, 4, 6], cible : 20
 <think>
 J'essaie 10 + 4 = 14, plus 6 ça fait 20. Ça marche directement.
@@ -92,9 +92,9 @@ J'essaie 10 + 4 = 14, plus 6 ça fait 20. Ça marche directement.
 <answer>
 10 + 4 + 6
 </answer>
- 
+
 À ton tour.
- 
+
 Nombres : {numbers}, cible : {target}
 """
 
@@ -108,21 +108,24 @@ def build_prompt(puzzle):
 # ---------------------------------------------------------------------------
 
 THINK_ANSWER_RE = re.compile(
-    r"^<think>.*?</think>\s*<answer>(.*?)</answer>\s*$", re.DOTALL
+    r"<think>.*?</think>\s*<answer>(.*?)</answer>", re.DOTALL
 )
 
 
 def reward_format(completion: str) -> float:
-    """1.0 si la structure <think>...</think><answer>...</answer> est
-    respectée, 0.0 sinon. Volontairement strict au début : un format
-    trop permissif est justement une source classique de reward hacking
-    (le modèle apprend à cocher la case sans vraiment respecter
-    l'intention)."""
-    return 1.0 if THINK_ANSWER_RE.match(completion.strip()) else 0.0
+    """1.0 si la structure <think>...</think><answer>...</answer> apparaît
+    quelque part dans la complétion, 0.0 sinon. Version assouplie : on
+    utilise .search() au lieu de .match(), donc du texte avant <think>
+    ou après </answer> ne fait plus échouer le format, contrairement à
+    la version stricte initiale. Le compromis : un peu plus de tolérance
+    sur du bruit autour, au risque d'un signal moins pur, à surveiller
+    si le modèle se met à générer du texte inutile juste pour gonfler la
+    longueur sans que ça soit pénalisé."""
+    return 1.0 if THINK_ANSWER_RE.search(completion.strip()) else 0.0
 
 
 def extract_answer(completion: str):
-    match = THINK_ANSWER_RE.match(completion.strip())
+    match = THINK_ANSWER_RE.search(completion.strip())
     if match is None:
         return None
     return match.group(1).strip()
