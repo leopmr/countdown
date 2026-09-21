@@ -68,20 +68,34 @@ def generate_dataset(n_puzzles=1000, n_numbers=4, seed=0):
 # 2. Template de prompt
 # ---------------------------------------------------------------------------
 
-PROMPT_TEMPLATE = """En utilisant les nombres {numbers}, chacun au plus une fois, \
-trouve une expression arithmétique (+, -, *, /) qui donne exactement {target}.
-
+PROMPT_TEMPLATE = """Tu résous des puzzles Countdown : à partir d'une liste de nombres, \
+trouve une expression arithmétique (+, -, *, /) qui donne exactement le nombre cible. \
+Chaque nombre ne peut être utilisé qu'une seule fois.
+ 
 Réfléchis d'abord dans des balises <think></think>, puis donne ton expression \
-finale dans des balises <answer></answer>. N'utilise que les nombres fournis, \
-chacun au maximum une fois.
-
-Exemple de format de réponse :
+finale dans des balises <answer></answer>, sans rien écrire après.
+ 
+Voici deux exemples résolus :
+ 
+Nombres : [3, 7, 2], cible : 17
 <think>
-quelques nombres, j'essaie ceci puis cela...
+J'essaie 7 * 2 = 14, il me reste 3, 14 + 3 = 17. Ça marche.
 </think>
 <answer>
-(a + b) * c
+7 * 2 + 3
 </answer>
+ 
+Nombres : [10, 4, 6], cible : 20
+<think>
+J'essaie 10 + 4 = 14, plus 6 ça fait 20. Ça marche directement.
+</think>
+<answer>
+10 + 4 + 6
+</answer>
+ 
+À ton tour.
+ 
+Nombres : {numbers}, cible : {target}
 """
 
 
