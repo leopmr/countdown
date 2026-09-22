@@ -47,7 +47,7 @@ OPS = {
 }
 
 
-def _random_solvable_puzzle(n_numbers=4, min_val=1, max_val=25, target_range=(10, 999)):
+def _random_solvable_puzzle(n_numbers=3, min_val=1, max_val=10, target_range=(10, 25)):
     """Génère un puzzle en partant d'une cible garantie atteignable :
     on tire des nombres au hasard, on les combine avec des opérations
     aléatoires pour produire la cible, puis on ne garde que le résultat
@@ -75,7 +75,7 @@ def _random_solvable_puzzle(n_numbers=4, min_val=1, max_val=25, target_range=(10
     return {"numbers": numbers, "target": target}
 
 
-def generate_dataset(n_puzzles=1000, n_numbers=4, seed=0):
+def generate_dataset(n_puzzles=1000, n_numbers=3, seed=0):
     random.seed(seed)
     return [_random_solvable_puzzle(n_numbers=n_numbers) for _ in range(n_puzzles)]
 
