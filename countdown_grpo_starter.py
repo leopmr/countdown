@@ -31,37 +31,40 @@ OPS = {
 }
 
 
-def _random_solvable_puzzle(n_numbers=4, min_val=1, max_val=25, target_range=(10, 999)):
+def _random_solvable_puzzle(n_numbers=3, min_val=1, max_val=10, target_range=(2, 100)):
     """Génère un puzzle en partant d'une cible garantie atteignable :
     on tire des nombres au hasard, on les combine avec des opérations
     aléatoires pour produire la cible, puis on ne garde que le résultat
-    final (le modèle devra retrouver un chemin, pas forcément celui-ci)."""
-    numbers = [random.randint(min_val, max_val) for _ in range(n_numbers)]
-    pool = numbers.copy()
-    random.shuffle(pool)
+    final (le modèle devra retrouver un chemin, pas forcément celui-ci).
+    La difficulté se règle avec n_numbers, max_val et target_range."""
+    while True:
+        numbers = [random.randint(min_val, max_val) for _ in range(n_numbers)]
+        pool = numbers.copy()
+        random.shuffle(pool)
 
-    value = pool[0]
-    for n in pool[1:]:
-        op = random.choice(list(OPS.values()))
-        try:
-            candidate = op(value, n)
-        except ZeroDivisionError:
-            candidate = value + n
-        # on évite les valeurs non entières ou négatives pour rester simple
-        if candidate != int(candidate) or candidate < 0:
-            candidate = value + n
-        value = candidate
+        value = pool[0]
+        for n in pool[1:]:
+            op = random.choice(list(OPS.values()))
+            try:
+                candidate = op(value, n)
+            except ZeroDivisionError:
+                candidate = value + n
+            # on évite les valeurs non entières ou négatives pour rester simple
+            if candidate != int(candidate) or candidate < 0:
+                candidate = value + n
+            value = candidate
 
-    target = int(value)
-    if not (target_range[0] <= target <= target_range[1]):
-        return _random_solvable_puzzle(n_numbers, min_val, max_val, target_range)
-
-    return {"numbers": numbers, "target": target}
+        target = int(value)
+        if target_range[0] <= target <= target_range[1]:
+            return {"numbers": numbers, "target": target}
 
 
-def generate_dataset(n_puzzles=1000, n_numbers=4, seed=0):
+def generate_dataset(n_puzzles=1000, n_numbers=3, max_val=10, target_range=(2, 100), seed=0):
     random.seed(seed)
-    return [_random_solvable_puzzle(n_numbers=n_numbers) for _ in range(n_puzzles)]
+    return [
+        _random_solvable_puzzle(n_numbers=n_numbers, max_val=max_val, target_range=target_range)
+        for _ in range(n_puzzles)
+    ]
 
 
 # ---------------------------------------------------------------------------

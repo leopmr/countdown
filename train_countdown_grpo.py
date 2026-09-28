@@ -47,8 +47,11 @@ OUTPUT_DIR = "./countdown-grpo-qwen1.5b-lora"
 # function via **kwargs, une valeur par exemple du dataset — c'est pour
 # ça qu'on les garde à côté du prompt plutôt que de les cacher dedans.
 
-def build_hf_dataset(n_puzzles=2000, n_numbers=4, seed=0):
-    puzzles = generate_dataset(n_puzzles=n_puzzles, n_numbers=n_numbers, seed=seed)
+def build_hf_dataset(n_puzzles=2000, n_numbers=3, max_val=10, target_range=(2, 100), seed=0):
+    puzzles = generate_dataset(
+        n_puzzles=n_puzzles, n_numbers=n_numbers, max_val=max_val,
+        target_range=target_range, seed=seed,
+    )
     records = [
         {
             "prompt": [{"role": "user", "content": build_prompt(p)}],  # format conversationnel : TRL applique le chat template
