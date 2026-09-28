@@ -31,6 +31,7 @@ from countdown_grpo_starter import (
     build_prompt,
     reward_format,
     reward_correctness,
+    completion_text,
 )
 
 
@@ -50,7 +51,7 @@ def build_hf_dataset(n_puzzles=2000, n_numbers=4, seed=0):
     puzzles = generate_dataset(n_puzzles=n_puzzles, n_numbers=n_numbers, seed=seed)
     records = [
         {
-            "prompt": build_prompt(p),
+            "prompt": [{"role": "user", "content": build_prompt(p)}],  # format conversationnel : TRL applique le chat template
             "numbers": p["numbers"],
             "target": p["target"],
         }
@@ -71,7 +72,11 @@ def build_hf_dataset(n_puzzles=2000, n_numbers=4, seed=0):
 def countdown_reward_func(prompts, completions, numbers, target, **kwargs):
     rewards = []
     for completion, nums, tgt in zip(completions, numbers, target):
-        r = 0.1 * reward_format(completion) + 1.0 * reward_correctness(completion, nums, tgt)
+        completion = completion_text(completion)
+        try:
+            r = 0.1 * reward_format(completion) + 1.0 * reward_correctness(completion, nums, tgt)
+        except Exception:
+            r = 0.0  # une sortie inattendue du modèle ne doit jamais interrompre l'entraînement
         rewards.append(r)
     return rewards
 
@@ -107,7 +112,10 @@ def evaluate_success_rate(model, tokenizer, eval_dataset, max_new_tokens=256):
     model.eval()
     successes = 0
     for example in eval_dataset:
-        inputs = tokenizer(example["prompt"], return_tensors="pt").to(model.device)
+        text = tokenizer.apply_chat_template(
+            example["prompt"], tokenize=False, add_generation_prompt=True
+        )
+        inputs = tokenizer(text, return_tensors="pt").to(model.device)
         with torch.no_grad():
             output_ids = model.generate(
                 **inputs, max_new_tokens=max_new_tokens, do_sample=False
@@ -131,8 +139,8 @@ def main():
     config = GRPOConfig(
         output_dir=OUTPUT_DIR,
         num_generations=8,                 # taille du groupe GRPO (G)
-        per_device_train_batch_size=8,      # doit rester compatible avec num_generations
-        gradient_accumulation_steps=4,
+        per_device_train_batch_size=4,      # petit mini-batch pour tenir sur une T4
+        gradient_accumulation_steps=2,      # batch effectif 8 = num_generations (un groupe par mise à jour)
         learning_rate=1e-5,                 # un peu plus élevé qu'en full fine-tuning, usage courant avec LoRA
         beta=0.04,                          # coefficient KL par rapport au modèle de référence
         max_completion_length=256,          # augmenté après avoir observé un clipped_ratio de 1.0 à 180 tokens
@@ -144,7 +152,7 @@ def main():
         eval_strategy="steps",
         eval_steps=50,
         report_to="none",                   # mets "wandb" si tu veux le suivi en ligne
-        model_init_kwargs={"torch_dtype": "bfloat16"},
+        model_init_kwargs={"dtype": "bfloat16"},   # "torch_dtype" n'était pas pris en compte (modèle chargé en float32)
     )
 
     trainer = GRPOTrainer(

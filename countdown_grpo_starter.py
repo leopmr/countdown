@@ -121,6 +121,15 @@ def reward_format(completion: str) -> float:
     return 1.0 if list(THINK_ANSWER_RE.finditer(completion.strip())) else 0.0
 
 
+def completion_text(completion) -> str:
+    """Avec un dataset conversationnel, TRL passe la complétion sous forme de
+    messages [{"role": "assistant", "content": "..."}] ; avec un dataset en
+    texte brut, c'est directement une chaîne. On accepte les deux."""
+    if isinstance(completion, list):
+        return completion[0]["content"] if completion else ""
+    return completion
+
+
 def extract_answer(completion: str):
     matches = list(THINK_ANSWER_RE.finditer(completion.strip()))
     if not matches:
