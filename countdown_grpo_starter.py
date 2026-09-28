@@ -14,22 +14,6 @@ avant de brancher un modèle, comme prévu en semaine 1 jours 1-4.
 """
 
 import random
-"""
-Point de départ du projet Countdown x GRPO.
-
-Contenu :
-1. Génération de puzzles Countdown (nombres + cible)
-2. Template de prompt avec balises <think>/<answer>
-3. Reward function de format (respecte la structure demandée)
-4. Reward function de correction (l'expression évalue-t-elle à la cible,
-   en utilisant uniquement les nombres fournis, chacun au plus une fois)
-
-Ce fichier ne fait pas encore l'entraînement (ça viendra avec TRL
-GRPOTrainer), c'est la brique de données + reward à valider isolément
-avant de brancher un modèle, comme prévu en semaine 1 jours 1-4.
-"""
-
-import random
 import re
 import itertools
 import operator
@@ -47,7 +31,7 @@ OPS = {
 }
 
 
-def _random_solvable_puzzle(n_numbers=3, min_val=1, max_val=10, target_range=(10, 25)):
+def _random_solvable_puzzle(n_numbers=4, min_val=1, max_val=25, target_range=(10, 999)):
     """Génère un puzzle en partant d'une cible garantie atteignable :
     on tire des nombres au hasard, on les combine avec des opérations
     aléatoires pour produire la cible, puis on ne garde que le résultat
@@ -75,7 +59,7 @@ def _random_solvable_puzzle(n_numbers=3, min_val=1, max_val=10, target_range=(10
     return {"numbers": numbers, "target": target}
 
 
-def generate_dataset(n_puzzles=1000, n_numbers=3, seed=0):
+def generate_dataset(n_puzzles=1000, n_numbers=4, seed=0):
     random.seed(seed)
     return [_random_solvable_puzzle(n_numbers=n_numbers) for _ in range(n_puzzles)]
 
@@ -180,11 +164,16 @@ def reward_correctness(completion: str, numbers: list[int], target: int) -> floa
         return 0.0
     if not _uses_numbers_correctly(expression, numbers):
         return 0.0
+    if "**" in expression:  # évite les puissances géantes (9**9**9) qui gèleraient l'entraînement
+        return 0.0
     try:
         value = eval(expression, {"__builtins__": {}}, {})  # nombres/opérateurs uniquement
+        # eval peut renvoyer autre chose qu'un nombre (Ellipsis pour "...", tuple pour "()")
+        if not isinstance(value, (int, float)):
+            return 0.0
+        return 1.0 if abs(value - target) < 1e-4 else 0.0
     except Exception:
         return 0.0
-    return 1.0 if abs(value - target) < 1e-4 else 0.0
 
 
 def total_reward(completion: str, numbers: list[int], target: int,
