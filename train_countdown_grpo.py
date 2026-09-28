@@ -1,9 +1,18 @@
 """
 Entraînement GRPO sur la tâche Countdown, avec la librairie TRL.
 
-Prérequis (sur Colab ou ta machine d'entraînement, PAS besoin ici pour
-lire le script) :
-    pip install trl transformers datasets accelerate
+Version 2 : Qwen2.5-1.5B-Instruct + LoRA, suite aux observations sur
+Qwen2.5-0.5B-Instruct (dérive du modèle, format peu respecté, coût
+mémoire du modèle de référence KL).
+
+Pourquoi LoRA ici : en passant peft_config à GRPOTrainer, TRL n'a plus
+besoin de charger une copie séparée du modèle de référence pour le
+calcul de la pénalité KL — il réutilise le même modèle avec l'adaptateur
+LoRA désactivé. Ça évite de doubler la mémoire GPU, ce qui a causé le
+OutOfMemoryError observé avec un ref_model séparé.
+
+Prérequis (sur Colab, PAS besoin ici pour lire le script) :
+    pip install trl transformers datasets accelerate peft
 
 Lancer avec :
     python train_countdown_grpo.py
@@ -14,6 +23,7 @@ reward_correctness définis là-bas).
 """
 
 from datasets import Dataset
+from peft import LoraConfig
 from trl import GRPOConfig, GRPOTrainer
 
 from countdown_grpo_starter import (
@@ -24,8 +34,8 @@ from countdown_grpo_starter import (
 )
 
 
-MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
-OUTPUT_DIR = "./countdown-grpo-qwen0.5b"
+MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+OUTPUT_DIR = "./countdown-grpo-qwen1.5b-lora"
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +77,25 @@ def countdown_reward_func(prompts, completions, numbers, target, **kwargs):
 
 
 # ---------------------------------------------------------------------------
-# 3. Évaluation simple : taux de réussite sur un jeu de puzzles tenus à part
+# 3. Configuration LoRA
+# ---------------------------------------------------------------------------
+# r et lora_alpha modestes, suffisants pour ce genre de tâche sans
+# alourdir l'entraînement. target_modules="all-linear" applique LoRA à
+# toutes les couches linéaires du modèle plutôt que de lister
+# manuellement q_proj/k_proj/v_proj/o_proj, plus simple et généralement
+# aussi performant pour un premier essai.
+
+peft_config = LoraConfig(
+    r=16,
+    lora_alpha=32,
+    lora_dropout=0.05,
+    target_modules="all-linear",
+    task_type="CAUSAL_LM",
+)
+
+
+# ---------------------------------------------------------------------------
+# 4. Évaluation simple : taux de réussite sur un jeu de puzzles tenus à part
 # ---------------------------------------------------------------------------
 # Utile pour suivre la vraie métrique qui t'intéresse (pas seulement la
 # reward moyenne pendant l'entraînement) : le pourcentage de puzzles
@@ -92,7 +120,7 @@ def evaluate_success_rate(model, tokenizer, eval_dataset, max_new_tokens=256):
 
 
 # ---------------------------------------------------------------------------
-# 4. Entraînement
+# 5. Entraînement
 # ---------------------------------------------------------------------------
 
 def main():
@@ -103,12 +131,13 @@ def main():
     config = GRPOConfig(
         output_dir=OUTPUT_DIR,
         num_generations=8,                 # taille du groupe GRPO (G)
-        per_device_train_batch_size=8,      # doit être un multiple de num_generations
+        per_device_train_batch_size=8,      # doit rester compatible avec num_generations
         gradient_accumulation_steps=4,
-        learning_rate=1e-6,
+        learning_rate=1e-5,                 # un peu plus élevé qu'en full fine-tuning, usage courant avec LoRA
         beta=0.04,                          # coefficient KL par rapport au modèle de référence
-        max_prompt_length=256,
-        max_completion_length=256,
+        max_completion_length=256,          # augmenté après avoir observé un clipped_ratio de 1.0 à 180 tokens
+        repetition_penalty=1.15,            # limite les boucles de tokens répétés observées sur le 0.5B
+        temperature=0.8,                    # légèrement réduit par rapport à 1.0 pour limiter la dérive incohérente
         num_train_epochs=1,
         logging_steps=5,
         save_steps=50,
@@ -124,6 +153,7 @@ def main():
         args=config,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
+        peft_config=peft_config,
     )
 
     print("Évaluation avant entraînement...")
