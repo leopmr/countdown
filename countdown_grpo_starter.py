@@ -13,6 +13,7 @@ GRPOTrainer), c'est la brique de données + reward à valider isolément
 avant de brancher un modèle, comme prévu en semaine 1 jours 1-4.
 """
 
+import math
 import random
 import re
 import itertools
@@ -188,10 +189,49 @@ def reward_correctness(completion: str, numbers: list[int], target: int) -> floa
         return 0.0
 
 
+def reward_valid(completion: str, numbers: list[int]) -> float:
+    """1.0 si la réponse est une expression exploitable : format respecté, caractères
+    autorisés, uniquement les nombres du puzzle (au plus une fois chacun), au moins une
+    opération (donc deux nombres ou plus), et un résultat numérique fini. Elle ne regarde
+    PAS la valeur obtenue : c'est le palier intermédiaire entre "format" et "correct".
+
+    Pourquoi ce palier : dans l'évaluation, près de la moitié des sorties échouaient avant
+    même qu'on compare la valeur (caractères interdits comme un "= 50" dans la balise, nombres
+    inventés). Avec une récompense tout ou rien, ces sorties valaient autant que des
+    expressions valides mais fausses, donc rien ne poussait le modèle à respecter les règles.
+
+    Exiger deux nombres au moins évite qu'un simple "7" rapporte le crédit de validité."""
+    expression = extract_answer(completion)
+    if expression is None:
+        return 0.0
+    if not ALLOWED_CHARS.match(expression) or "**" in expression:
+        return 0.0
+    if len(_extract_numbers_used(expression)) < 2:
+        return 0.0
+    if not _uses_numbers_correctly(expression, numbers):
+        return 0.0
+    try:
+        value = eval(expression, {"__builtins__": {}}, {})
+    except Exception:
+        return 0.0
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
+        return 0.0
+    return 1.0
+
+
+# Poids des trois paliers : format < validité < correction. La correction domine (écart de 1.0
+# contre 0.1 pour chacun des deux autres), pour que le modèle ne se contente pas d'expressions
+# valides mais fausses. Une réponse correcte vaut 1.2, valide mais fausse 0.2, bien balisée
+# mais inexploitable 0.1, sinon 0.
+REWARD_WEIGHTS = (0.1, 0.1, 1.0)
+
+
 def total_reward(completion: str, numbers: list[int], target: int,
-                  format_weight=0.1, correctness_weight=1.0) -> float:
-    return (format_weight * reward_format(completion)
-            + correctness_weight * reward_correctness(completion, numbers, target))
+                  weights=REWARD_WEIGHTS) -> float:
+    w_format, w_valid, w_correct = weights
+    return (w_format * reward_format(completion)
+            + w_valid * reward_valid(completion, numbers)
+            + w_correct * reward_correctness(completion, numbers, target))
 
 
 # ===========================================================================
@@ -216,4 +256,7 @@ if __name__ == "__main__":
     print("correctness(good)       :", reward_correctness(good_completion, puzzle["numbers"], puzzle["target"]))  # 1.0
     print("correctness(wrong_num)  :", reward_correctness(wrong_number, puzzle["numbers"], puzzle["target"]))     # 0.0
     print("correctness(wrong_res)  :", reward_correctness(wrong_result, puzzle["numbers"], puzzle["target"]))    # 0.0
-    print("total(good)             :", total_reward(good_completion, puzzle["numbers"], puzzle["target"]))       # 1.1
+    print("valid(wrong_res)        :", reward_valid(wrong_result, puzzle["numbers"]))    # 1.0 : valide mais fausse
+    print("valid(wrong_num)        :", reward_valid(wrong_number, puzzle["numbers"]))    # 0.0 : nombre inventé
+    print("total(good)             :", total_reward(good_completion, puzzle["numbers"], puzzle["target"]))       # 1.2
+    print("total(wrong_res)        :", total_reward(wrong_result, puzzle["numbers"], puzzle["target"]))          # 0.2

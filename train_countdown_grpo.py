@@ -1,25 +1,34 @@
 """
 Entraînement GRPO sur la tâche Countdown, avec la librairie TRL.
 
-Version 2 : Qwen2.5-1.5B-Instruct + LoRA, suite aux observations sur
-Qwen2.5-0.5B-Instruct (dérive du modèle, format peu respecté, coût
-mémoire du modèle de référence KL).
+Version 3 : récompense à trois paliers et plus de puzzles par mise à jour.
 
-Pourquoi LoRA ici : en passant peft_config à GRPOTrainer, TRL n'a plus
-besoin de charger une copie séparée du modèle de référence pour le
-calcul de la pénalité KL — il réutilise le même modèle avec l'adaptateur
-LoRA désactivé. Ça évite de doubler la mémoire GPU, ce qui a causé le
-OutOfMemoryError observé avec un ref_model séparé.
+Ce qui change par rapport à la version précédente, et pourquoi :
+  - Récompense en trois paliers (format 0.1, validité 0.1, correction 1.0) au lieu de deux.
+    Le diagnostic d'évaluation montrait que près de la moitié des sorties échouaient avant
+    la comparaison de valeur (caractères interdits, nombres inventés) sans que rien ne les
+    distingue d'une expression valide mais fausse.
+  - Trois fonctions de récompense séparées : TRL journalise la moyenne de chacune
+    ("rewards/<nom>/mean"), ce qui permet de voir quel palier progresse.
+  - 4 puzzles par mise à jour au lieu de 1 (gradient moins bruité).
+  - Plus de repetition_penalty (elle pénalise aussi les tokens du prompt, et les boucles
+    qu'elle visait ont disparu avec le chat template).
+  - L'évaluation n'est plus faite ici : elle passe par eval_countdown.py, avec un jeu fixe
+    exclu de l'entraînement. L'évaluation intégrée au Trainer coûtait du GPU pour une mesure
+    différente de celle qu'on utilise pour comparer les modèles.
 
-Prérequis (sur Colab, PAS besoin ici pour lire le script) :
+Prérequis (sur Colab) :
     pip install trl transformers datasets accelerate peft
 
-Lancer avec :
-    python train_countdown_grpo.py
+Dans un notebook :
+    from train_countdown_grpo import build_hf_dataset, make_config, REWARD_FUNCS, peft_config, MODEL_NAME
+    config = make_config(output_dir="/content/drive/MyDrive/countdown-grpo-v3", max_steps=60)
+    trainer = GRPOTrainer(model=MODEL_NAME, reward_funcs=REWARD_FUNCS, args=config,
+                          train_dataset=build_hf_dataset(), peft_config=peft_config)
+    trainer.train()
 
-Ce script suppose que countdown_grpo_starter.py est dans le même
-dossier (il réutilise generate_dataset, build_prompt, reward_format,
-reward_correctness définis là-bas).
+En ligne de commande :
+    python train_countdown_grpo.py
 """
 
 from datasets import Dataset
@@ -27,25 +36,26 @@ from peft import LoraConfig
 from trl import GRPOConfig, GRPOTrainer
 
 from countdown_grpo_starter import (
-    generate_dataset,
-    build_prompt,
-    reward_format,
-    reward_correctness,
+    REWARD_WEIGHTS,
     completion_text,
+    build_prompt,
+    generate_dataset,
+    reward_correctness,
+    reward_format,
+    reward_valid,
 )
 
 
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
-OUTPUT_DIR = "./countdown-grpo-qwen1.5b-lora"
+OUTPUT_DIR = "./countdown-grpo-qwen1.5b-lora-v3"
 
 
 # ---------------------------------------------------------------------------
-# 1. Construction du dataset au format attendu par GRPOTrainer
+# 1. Dataset au format conversationnel (TRL applique le chat template)
 # ---------------------------------------------------------------------------
-# GRPOTrainer attend une colonne "prompt". Les autres colonnes (ici
-# "numbers" et "target") sont transmises telles quelles à la reward
-# function via **kwargs, une valeur par exemple du dataset — c'est pour
-# ça qu'on les garde à côté du prompt plutôt que de les cacher dedans.
+# Les paramètres par défaut doivent rester alignés avec TRAIN_KWARGS, TRAIN_SEED et
+# TRAIN_N_PUZZLES de eval_countdown.py : c'est ce qui permet d'exclure les puzzles
+# d'entraînement du jeu d'évaluation.
 
 def build_hf_dataset(n_puzzles=2000, n_numbers=3, max_val=10, target_range=(2, 100), seed=0):
     puzzles = generate_dataset(
@@ -54,7 +64,7 @@ def build_hf_dataset(n_puzzles=2000, n_numbers=3, max_val=10, target_range=(2, 1
     )
     records = [
         {
-            "prompt": [{"role": "user", "content": build_prompt(p)}],  # format conversationnel : TRL applique le chat template
+            "prompt": [{"role": "user", "content": build_prompt(p)}],
             "numbers": p["numbers"],
             "target": p["target"],
         }
@@ -64,34 +74,60 @@ def build_hf_dataset(n_puzzles=2000, n_numbers=3, max_val=10, target_range=(2, 1
 
 
 # ---------------------------------------------------------------------------
-# 2. Reward function au format attendu par GRPOTrainer
+# 2. Trois fonctions de récompense (une par palier)
 # ---------------------------------------------------------------------------
-# Signature imposée : (prompts, completions, **kwargs) -> list[float].
-# "numbers" et "target" arrivent dans kwargs car ce sont des colonnes du
-# dataset, répétées automatiquement par le trainer pour chaque complétion
-# générée à partir du même prompt (num_generations complétions par
-# prompt, donc par exemple du dataset).
+# Signature imposée par GRPOTrainer : (prompts, completions, **kwargs) -> list[float].
+# Les colonnes du dataset ("numbers", "target") arrivent dans kwargs. Le nom de la fonction
+# sert de clé dans les logs : rewards/format_reward/mean, etc. Une sortie inattendue du
+# modèle ne doit jamais interrompre l'entraînement, d'où les try/except.
+
+def format_reward(prompts, completions, **kwargs):
+    out = []
+    for c in completions:
+        try:
+            out.append(reward_format(completion_text(c)))
+        except Exception:
+            out.append(0.0)
+    return out
+
+
+def valid_reward(prompts, completions, numbers, **kwargs):
+    out = []
+    for c, nums in zip(completions, numbers):
+        try:
+            out.append(reward_valid(completion_text(c), nums))
+        except Exception:
+            out.append(0.0)
+    return out
+
+
+def correct_reward(prompts, completions, numbers, target, **kwargs):
+    out = []
+    for c, nums, tgt in zip(completions, numbers, target):
+        try:
+            out.append(reward_correctness(completion_text(c), nums, tgt))
+        except Exception:
+            out.append(0.0)
+    return out
+
+
+REWARD_FUNCS = [format_reward, valid_reward, correct_reward]
+
 
 def countdown_reward_func(prompts, completions, numbers, target, **kwargs):
-    rewards = []
-    for completion, nums, tgt in zip(completions, numbers, target):
-        completion = completion_text(completion)
-        try:
-            r = 0.1 * reward_format(completion) + 1.0 * reward_correctness(completion, nums, tgt)
-        except Exception:
-            r = 0.0  # une sortie inattendue du modèle ne doit jamais interrompre l'entraînement
-        rewards.append(r)
-    return rewards
+    """Somme pondérée des trois paliers en une seule fonction (même valeur que le total
+    calculé par TRL avec reward_weights). Utile pour un test rapide en notebook, mais on perd
+    le suivi séparé de chaque palier dans les logs : préfère REWARD_FUNCS."""
+    f = format_reward(prompts, completions)
+    v = valid_reward(prompts, completions, numbers)
+    c = correct_reward(prompts, completions, numbers, target)
+    wf, wv, wc = REWARD_WEIGHTS
+    return [wf * a + wv * b + wc * d for a, b, d in zip(f, v, c)]
 
 
 # ---------------------------------------------------------------------------
-# 3. Configuration LoRA
+# 3. LoRA
 # ---------------------------------------------------------------------------
-# r et lora_alpha modestes, suffisants pour ce genre de tâche sans
-# alourdir l'entraînement. target_modules="all-linear" applique LoRA à
-# toutes les couches linéaires du modèle plutôt que de lister
-# manuellement q_proj/k_proj/v_proj/o_proj, plus simple et généralement
-# aussi performant pour un premier essai.
 
 peft_config = LoraConfig(
     r=16,
@@ -103,84 +139,44 @@ peft_config = LoraConfig(
 
 
 # ---------------------------------------------------------------------------
-# 4. Évaluation simple : taux de réussite sur un jeu de puzzles tenus à part
+# 4. Configuration
 # ---------------------------------------------------------------------------
-# Utile pour suivre la vraie métrique qui t'intéresse (pas seulement la
-# reward moyenne pendant l'entraînement) : le pourcentage de puzzles
-# résolus correctement, à comparer avant/après entraînement.
 
-def evaluate_success_rate(model, tokenizer, eval_dataset, max_new_tokens=256):
-    import torch
+def make_config(**overrides):
+    """Configuration de référence. Chaque valeur est explicite (pas de dépendance à des défauts
+    de version). Passe des surcharges par mots-clés : make_config(max_steps=100, beta=0.0)."""
+    params = dict(
+        output_dir=OUTPUT_DIR,
+        num_generations=8,                  # taille du groupe GRPO (G)
+        per_device_train_batch_size=4,      # micro-batch (mémoire)
+        gradient_accumulation_steps=8,      # batch effectif 4 x 8 = 32 complétions = 4 puzzles
+                                            # (doit rester un multiple de num_generations)
+        learning_rate=1e-5,
+        beta=0.04,                          # coefficient KL
+        temperature=1.0,                    # défaut TRL, inchangé pour isoler l'effet de la récompense
+        max_completion_length=200,
+        max_steps=60,                       # 60 pas x 4 puzzles = 240 puzzles vus
+        reward_weights=list(REWARD_WEIGHTS),
+        logging_steps=1,
+        save_steps=20,                      # checkpoints fréquents (Drive) : Colab peut se déconnecter
+        eval_strategy="no",                 # l'évaluation passe par eval_countdown.py
+        report_to="none",
+        model_init_kwargs={"dtype": "bfloat16"},
+    )
+    params.update(overrides)
+    return GRPOConfig(**params)
 
-    model.eval()
-    successes = 0
-    for example in eval_dataset:
-        text = tokenizer.apply_chat_template(
-            example["prompt"], tokenize=False, add_generation_prompt=True
-        )
-        inputs = tokenizer(text, return_tensors="pt").to(model.device)
-        with torch.no_grad():
-            output_ids = model.generate(
-                **inputs, max_new_tokens=max_new_tokens, do_sample=False
-            )
-        completion = tokenizer.decode(
-            output_ids[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
-        )
-        successes += reward_correctness(completion, example["numbers"], example["target"])
-    return successes / len(eval_dataset)
-
-
-# ---------------------------------------------------------------------------
-# 5. Entraînement
-# ---------------------------------------------------------------------------
 
 def main():
-    dataset = build_hf_dataset(n_puzzles=2000)
-    split = dataset.train_test_split(test_size=0.05, seed=0)
-    train_dataset, eval_dataset = split["train"], split["test"]
-
-    config = GRPOConfig(
-        output_dir=OUTPUT_DIR,
-        num_generations=8,                 # taille du groupe GRPO (G)
-        per_device_train_batch_size=4,      # petit mini-batch pour tenir sur une T4
-        gradient_accumulation_steps=2,      # batch effectif 8 = num_generations (un groupe par mise à jour)
-        learning_rate=1e-5,                 # un peu plus élevé qu'en full fine-tuning, usage courant avec LoRA
-        beta=0.04,                          # coefficient KL par rapport au modèle de référence
-        max_completion_length=256,          # augmenté après avoir observé un clipped_ratio de 1.0 à 180 tokens
-        repetition_penalty=1.15,            # limite les boucles de tokens répétés observées sur le 0.5B
-        temperature=0.8,                    # légèrement réduit par rapport à 1.0 pour limiter la dérive incohérente
-        num_train_epochs=1,
-        logging_steps=5,
-        save_steps=50,
-        eval_strategy="steps",
-        eval_steps=50,
-        report_to="none",                   # mets "wandb" si tu veux le suivi en ligne
-        model_init_kwargs={"dtype": "bfloat16"},   # "torch_dtype" n'était pas pris en compte (modèle chargé en float32)
-    )
-
     trainer = GRPOTrainer(
         model=MODEL_NAME,
-        reward_funcs=countdown_reward_func,
-        args=config,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
+        reward_funcs=REWARD_FUNCS,
+        args=make_config(),
+        train_dataset=build_hf_dataset(),
         peft_config=peft_config,
     )
-
-    print("Évaluation avant entraînement...")
-    success_before = evaluate_success_rate(
-        trainer.model, trainer.processing_class, eval_dataset
-    )
-    print(f"Taux de réussite avant : {success_before:.2%}")
-
     trainer.train()
     trainer.save_model(OUTPUT_DIR)
-
-    print("Évaluation après entraînement...")
-    success_after = evaluate_success_rate(
-        trainer.model, trainer.processing_class, eval_dataset
-    )
-    print(f"Taux de réussite après : {success_after:.2%}")
 
 
 if __name__ == "__main__":
