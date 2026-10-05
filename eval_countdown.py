@@ -1,10 +1,15 @@
 """
 Évaluation standardisée d'un modèle Countdown (modèle de base ou base + LoRA).
 
-Deux modes :
-  short : ~50 puzzles, génération déterministe. Contrôle rapide pendant les itérations.
-  long  : ~300 puzzles déterministes, + échantillonnage (pass@k), + puzzles plus durs
-          (test de généralisation), + répartition des échecs. Pour les résultats du rapport.
+Trois modes :
+  short : 50 puzzles, génération déterministe. Contrôle rapide pendant les itérations.
+  mid   : 300 puzzles, génération déterministe seule. Suffisant pour la comparaison appariée
+          entre deux modèles (voir compare_evals.py), nettement moins long que "long".
+  long  : 300 puzzles déterministes, + échantillonnage (pass@k), + puzzles plus durs
+          (test de généralisation). Pour les résultats du rapport.
+
+Chaque résultat contient le détail par puzzle (juste ou non, étape d'échec, et la réponse
+complète en mode déterministe), ce qui permet la comparaison appariée de compare_evals.py.
 
 Exemples :
   python eval_countdown.py --mode short
@@ -31,6 +36,7 @@ import argparse
 import hashlib
 import json
 import math
+import random
 import time
 from collections import Counter
 from datetime import datetime
@@ -56,6 +62,7 @@ TRAIN_KWARGS = dict(n_numbers=3, max_val=10, target_range=(2, 100))   # idem ent
 
 MODES = {
     "short": dict(n_eval=50, n_sampled=0, k=0, n_hard=0),
+    "mid": dict(n_eval=300, n_sampled=0, k=0, n_hard=0),
     "long": dict(n_eval=300, n_sampled=100, k=4, n_hard=100),
 }
 
@@ -187,18 +194,34 @@ def stage(text, numbers, target):
     return "5. juste" if reward_correctness(text, numbers, target) == 1.0 else "4. mauvaise valeur"
 
 
-def summarize(samples, puzzles, k=1):
-    """samples : liste de (texte, n_tokens, tronqué), k séquences par puzzle consécutives."""
+def bootstrap_ci(values, n_boot=5000, seed=0):
+    """IC95 par bootstrap en rééchantillonnant les PUZZLES (pas les tirages) : les k tirages
+    d'un même puzzle sont corrélés, les traiter comme indépendants donnerait un intervalle
+    trop étroit."""
+    rng = random.Random(seed)
+    n = len(values)
+    means = sorted(sum(values[rng.randrange(n)] for _ in range(n)) / n for _ in range(n_boot))
+    return (means[int(0.025 * n_boot)], means[int(0.975 * n_boot) - 1])
+
+
+def summarize(samples, puzzles, k=1, keep_text=False):
+    """samples : liste de (texte, n_tokens, tronqué), k séquences par puzzle consécutives.
+    Retourne (résumé, exemples). Le résumé contient "per_puzzle", le détail de chaque puzzle."""
     n_p = len(puzzles)
     correct = [[] for _ in range(n_p)]
+    stage_of = [[] for _ in range(n_p)]
+    texts = [[] for _ in range(n_p)]
     stages, fmt, lengths, trunc = Counter(), 0, [], 0
     examples = {}
     for i, (text, n_tok, truncated) in enumerate(samples):
         j = i // k
         p = puzzles[j]
         ok = reward_correctness(text, p["numbers"], p["target"]) == 1.0
-        correct[j].append(ok)
         s = stage(text, p["numbers"], p["target"])
+        correct[j].append(ok)
+        stage_of[j].append(s)
+        if keep_text:
+            texts[j].append(text)
         stages[s] += 1
         examples.setdefault(s, text[-300:])
         fmt += reward_format(text) == 1.0
@@ -207,16 +230,29 @@ def summarize(samples, puzzles, k=1):
 
     n_s = len(samples)
     n_ok = sum(sum(c) for c in correct)
-    lo, hi = wilson(n_ok, n_s)
+    if k == 1:
+        ci = wilson(n_ok, n_s)
+    else:
+        ci = bootstrap_ci([sum(c) / len(c) for c in correct])
+
+    per_puzzle = []
+    for j, p in enumerate(puzzles):
+        row = {"numbers": p["numbers"], "target": p["target"],
+               "correct": correct[j], "stage": stage_of[j]}
+        if keep_text:
+            row["completion"] = texts[j][0] if k == 1 else texts[j]
+        per_puzzle.append(row)
+
     summary = {
         "n_puzzles": n_p,
         "n_samples": n_s,
         "accuracy": n_ok / n_s,
-        "ci95": [lo, hi],
+        "ci95": [ci[0], ci[1]],
         "format_rate": fmt / n_s,
         "mean_tokens": sum(lengths) / n_s,
         "truncated_rate": trunc / n_s,
         "stages": dict(sorted(stages.items())),
+        "per_puzzle": per_puzzle,
     }
     if k > 1:
         summary["pass_at_k"] = sum(any(c) for c in correct) / n_p
@@ -254,7 +290,7 @@ def run_eval(model, tokenizer, mode="short", tag="", adapter=None, base_model=BA
 
     print(f"\n[1/..] Évaluation déterministe sur {len(eval_set)} puzzles")
     greedy = _run_batches(model, tokenizer, eval_set, max_new_tokens, batch_size, do_sample=False)
-    result["greedy"], examples = summarize(greedy, eval_set)
+    result["greedy"], examples = summarize(greedy, eval_set, keep_text=True)
 
     if cfg["n_sampled"]:
         sub = eval_set[:cfg["n_sampled"]]
