@@ -64,11 +64,11 @@ def main():
     ap = argparse.ArgumentParser(description="Comparaison appariée de deux évaluations")
     ap.add_argument("a", help="JSON de référence (A), par exemple la baseline")
     ap.add_argument("b", help="JSON à comparer (B), par exemple le modèle entraîné")
-    ap.add_argument("--section", choices=["greedy", "hard"], default="greedy")
+    ap.add_argument("--section", choices=["greedy", "sampled", "hard"], default="greedy")
     args = ap.parse_args()
 
     ra, rb = load(args.a), load(args.b)
-    hash_key = "eval_set_hash" if args.section == "greedy" else "hard_set_hash"
+    hash_key = "hard_set_hash" if args.section == "hard" else "eval_set_hash"
     if args.section not in ra or args.section not in rb:
         sys.exit(f"Section '{args.section}' absente de l'un des fichiers (mode long requis pour 'hard').")
     if ra.get(hash_key) != rb.get(hash_key):
@@ -81,6 +81,29 @@ def main():
 
     paired = "per_puzzle" in sa and "per_puzzle" in sb
     n = sa["n_puzzles"]
+
+    if args.section == "sampled":
+        if not paired or sa["n_puzzles"] != sb["n_puzzles"]:
+            sys.exit("Section 'sampled' : détail par puzzle absent ou nombre de puzzles différent.")
+        pa, pb = sa["per_puzzle"], sb["per_puzzle"]
+        for i, (x, y) in enumerate(zip(pa, pb)):
+            if x["numbers"] != y["numbers"] or x["target"] != y["target"]:
+                sys.exit(f"Puzzles non alignés à l'indice {i} : comparaison impossible.")
+        ma = [sum(r["correct"]) / len(r["correct"]) for r in pa]
+        mb = [sum(r["correct"]) / len(r["correct"]) for r in pb]
+        diffs = [y - x for x, y in zip(ma, mb)]
+        lo, hi = bootstrap_diff_ci(diffs)
+        up = sum(d > 0 for d in diffs)
+        down = sum(d < 0 for d in diffs)
+        p = mcnemar_exact(down, up)  # test des signes exact sur les puzzles dont le score change
+        print(f"Précision échantillonnée A : {sum(ma) / n:.1%}   B : {sum(mb) / n:.1%}")
+        print(f"Différence B moins A : {sum(diffs) / n:+.1%}   IC95 bootstrap par puzzle [{lo:+.1%} ; {hi:+.1%}]")
+        if "pass_at_k" in sa and "pass_at_k" in sb:
+            print(f"pass@{sa['k']} A : {sa['pass_at_k']:.1%}   B : {sb['pass_at_k']:.1%}")
+        print(f"\nPuzzles meilleurs avec B : {up}, avec A : {down}, égaux : {n - up - down}")
+        print(f"Test des signes exact : p = {p:.4f}")
+        print("  Différence significative à 5 %." if p < 0.05 else "  Pas de différence significative à 5 %.")
+        return
 
     if not paired:
         xa, xb = round(sa["accuracy"] * n), round(sb["accuracy"] * n)

@@ -64,6 +64,8 @@ MODES = {
     "short": dict(n_eval=50, n_sampled=0, k=0, n_hard=0),
     "mid": dict(n_eval=300, n_sampled=0, k=0, n_hard=0),
     "long": dict(n_eval=300, n_sampled=100, k=4, n_hard=100),
+    # Pour comparer deux modèles en échantillonnage : 200 puzzles x 4 tirages, sans puzzles durs
+    "samp": dict(n_eval=300, n_sampled=200, k=4, n_hard=0),
 }
 
 
@@ -369,4 +371,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()  
+    main()
