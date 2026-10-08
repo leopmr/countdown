@@ -278,27 +278,38 @@ def _run_batches(model, tokenizer, puzzles, max_new_tokens, batch_size, **gen_kw
 # ---------------------------------------------------------------------------
 
 def run_eval(model, tokenizer, mode="short", tag="", adapter=None, base_model=BASE_MODEL,
-             max_new_tokens=200, batch_size=16, out_dir="eval_results"):
+             max_new_tokens=200, batch_size=16, out_dir="eval_results",
+             temperature=0.7, seed=None, skip_greedy=False):
+    """temperature : température de la partie échantillonnée (0.7 par défaut, comme avant).
+    seed : graine torch pour l'échantillonnage (None = non fixée). skip_greedy : saute la
+    partie déterministe, utile pour refaire seulement l'échantillonné à une autre température
+    (le glouton ne dépend pas de la température)."""
     cfg = MODES[mode]
     t0 = time.time()
     result = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "mode": mode, "tag": tag, "base_model": base_model,
         "adapter": adapter, "max_new_tokens": max_new_tokens,
+        "temperature": temperature, "seed": seed,
     }
+    if seed is not None:
+        import torch
+        torch.manual_seed(seed)
 
     eval_set = build_eval_set(cfg["n_eval"])
     result["eval_set_hash"] = fingerprint(eval_set)
 
-    print(f"\n[1/..] Évaluation déterministe sur {len(eval_set)} puzzles")
-    greedy = _run_batches(model, tokenizer, eval_set, max_new_tokens, batch_size, do_sample=False)
-    result["greedy"], examples = summarize(greedy, eval_set, keep_text=True)
+    examples = None
+    if not skip_greedy:
+        print(f"\n[1/..] Évaluation déterministe sur {len(eval_set)} puzzles")
+        greedy = _run_batches(model, tokenizer, eval_set, max_new_tokens, batch_size, do_sample=False)
+        result["greedy"], examples = summarize(greedy, eval_set, keep_text=True)
 
     if cfg["n_sampled"]:
         sub = eval_set[:cfg["n_sampled"]]
-        print(f"[2/..] Échantillonnage : {len(sub)} puzzles x {cfg['k']} tirages (T=0.7)")
+        print(f"[2/..] Échantillonnage : {len(sub)} puzzles x {cfg['k']} tirages (T={temperature})")
         sampled = _run_batches(model, tokenizer, sub, max_new_tokens, batch_size,
-                               do_sample=True, temperature=0.7, num_return_sequences=cfg["k"])
+                               do_sample=True, temperature=temperature, num_return_sequences=cfg["k"])
         result["sampled"], _ = summarize(sampled, sub, k=cfg["k"])
 
     if cfg["n_hard"]:
@@ -316,10 +327,11 @@ def run_eval(model, tokenizer, mode="short", tag="", adapter=None, base_model=BA
 
 
 def print_report(r, examples=None):
-    g = r["greedy"]
+    g = r.get("greedy")
+    ref = g or r["sampled"]
     print("\n" + "=" * 64)
     print(f"mode={r['mode']}  tag={r['tag'] or '-'}  adapter={r['adapter'] or 'aucun (base)'}")
-    print(f"jeu d'éval : {g['n_puzzles']} puzzles, empreinte {r['eval_set_hash']}")
+    print(f"jeu d'éval : {ref['n_puzzles']} puzzles, empreinte {r['eval_set_hash']}")
     print("=" * 64)
 
     def line(name, s):
@@ -329,14 +341,16 @@ def print_report(r, examples=None):
               f"format {s['format_rate']:.0%}  tronquées {s['truncated_rate']:.0%}  "
               f"long. moy. {s['mean_tokens']:.0f} tok{extra}")
 
-    line("déterministe", g)
+    if g:
+        line("déterministe", g)
     if "sampled" in r:
-        line("échantillonné", r["sampled"])
+        line(f"éch. T={r.get('temperature', 0.7)}", r["sampled"])
     if "hard" in r:
         line("puzzles durs", r["hard"])
-    print("\nRépartition des échecs (déterministe) :")
-    for st, c in g["stages"].items():
-        print(f"  {st:26} {c:4d}  ({c / g['n_samples']:.0%})")
+    if g:
+        print("\nRépartition des échecs (déterministe) :")
+        for st, c in g["stages"].items():
+            print(f"  {st:26} {c:4d}  ({c / g['n_samples']:.0%})")
     print(f"\ndurée : {r['duration_s']} s")
 
 
@@ -347,8 +361,10 @@ def save(result, out_dir):
     name = f"{stamp}_{result['mode']}_{result['tag'] or 'run'}.json"
     (out / name).write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
     summary = {k: result[k] for k in ("timestamp", "mode", "tag", "adapter", "eval_set_hash")}
-    summary["accuracy"] = round(result["greedy"]["accuracy"], 4)
-    summary["ci95"] = [round(x, 4) for x in result["greedy"]["ci95"]]
+    main_part = result.get("greedy") or result["sampled"]
+    summary["accuracy"] = round(main_part["accuracy"], 4)
+    summary["ci95"] = [round(x, 4) for x in main_part["ci95"]]
+    summary["temperature"] = result.get("temperature") if "greedy" not in result else None
     with open(out / "history.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(summary, ensure_ascii=False) + "\n")
     print(f"\nrésultats : {out / name}\nhistorique : {out / 'history.jsonl'}")
@@ -363,11 +379,17 @@ def main():
     ap.add_argument("--max-new-tokens", type=int, default=200)
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--out-dir", default="eval_results")
+    ap.add_argument("--temperature", type=float, default=0.7,
+                    help="température de la partie échantillonnée (défaut 0.7)")
+    ap.add_argument("--seed", type=int, default=None, help="graine de l'échantillonnage")
+    ap.add_argument("--skip-greedy", action="store_true",
+                    help="saute la partie déterministe (elle ne dépend pas de la température)")
     a = ap.parse_args()
 
     model, tokenizer = load_model(a.base_model, a.adapter)
     run_eval(model, tokenizer, mode=a.mode, tag=a.tag, adapter=a.adapter, base_model=a.base_model,
-             max_new_tokens=a.max_new_tokens, batch_size=a.batch_size, out_dir=a.out_dir)
+             max_new_tokens=a.max_new_tokens, batch_size=a.batch_size, out_dir=a.out_dir,
+             temperature=a.temperature, seed=a.seed, skip_greedy=a.skip_greedy)
 
 
 if __name__ == "__main__":

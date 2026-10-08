@@ -85,11 +85,15 @@ def main():
     if args.section == "sampled":
         if not paired or sa["n_puzzles"] != sb["n_puzzles"]:
             sys.exit("Section 'sampled' : détail par puzzle absent ou nombre de puzzles différent.")
+        ta, tb = ra.get("temperature", 0.7), rb.get("temperature", 0.7)  # anciens fichiers : 0.7
+        if ta != tb:
+            sys.exit(f"Comparaison invalide : températures différentes ({ta} contre {tb}).")
+        print(f"Température d'échantillonnage : {ta}")
         pa, pb = sa["per_puzzle"], sb["per_puzzle"]
         for i, (x, y) in enumerate(zip(pa, pb)):
             if x["numbers"] != y["numbers"] or x["target"] != y["target"]:
                 sys.exit(f"Puzzles non alignés à l'indice {i} : comparaison impossible.")
-        ma = [sum(r["correct"]) / len(r["correct"]) for r in pa]
+        ma =[sum(r["correct"]) / len(r["correct"]) for r in pa]
         mb = [sum(r["correct"]) / len(r["correct"]) for r in pb]
         diffs = [y - x for x, y in zip(ma, mb)]
         lo, hi = bootstrap_diff_ci(diffs)
