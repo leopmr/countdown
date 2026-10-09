@@ -64,11 +64,11 @@ def main():
     ap = argparse.ArgumentParser(description="Comparaison appariée de deux évaluations")
     ap.add_argument("a", help="JSON de référence (A), par exemple la baseline")
     ap.add_argument("b", help="JSON à comparer (B), par exemple le modèle entraîné")
-    ap.add_argument("--section", choices=["greedy", "sampled", "hard"], default="greedy")
+    ap.add_argument("--section", choices=["greedy", "sampled", "hard", "hard_sampled"], default="greedy")
     args = ap.parse_args()
 
     ra, rb = load(args.a), load(args.b)
-    hash_key = "hard_set_hash" if args.section == "hard" else "eval_set_hash"
+    hash_key = "hard_set_hash" if args.section in ("hard", "hard_sampled") else "eval_set_hash"
     if args.section not in ra or args.section not in rb:
         sys.exit(f"Section '{args.section}' absente de l'un des fichiers (mode long requis pour 'hard').")
     if ra.get(hash_key) != rb.get(hash_key):
@@ -82,7 +82,7 @@ def main():
     paired = "per_puzzle" in sa and "per_puzzle" in sb
     n = sa["n_puzzles"]
 
-    if args.section == "sampled":
+    if args.section in ("sampled", "hard_sampled"):
         if not paired or sa["n_puzzles"] != sb["n_puzzles"]:
             sys.exit("Section 'sampled' : détail par puzzle absent ou nombre de puzzles différent.")
         ta, tb = ra.get("temperature", 0.7), rb.get("temperature", 0.7)  # anciens fichiers : 0.7

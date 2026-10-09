@@ -66,6 +66,9 @@ MODES = {
     "long": dict(n_eval=300, n_sampled=100, k=4, n_hard=100),
     # Pour comparer deux modèles en échantillonnage : 200 puzzles x 4 tirages, sans puzzles durs
     "samp": dict(n_eval=300, n_sampled=200, k=4, n_hard=0),
+    # Généralisation seule : 100 puzzles durs (4 nombres, cible jusqu'à 999), en déterministe puis
+    # en échantillonné (100 x 4 tirages à la température demandée). Pas de jeu standard.
+    "hard": dict(n_eval=0, n_sampled=0, k=4, n_hard=100, n_hard_sampled=100),
 }
 
 
@@ -296,11 +299,11 @@ def run_eval(model, tokenizer, mode="short", tag="", adapter=None, base_model=BA
         import torch
         torch.manual_seed(seed)
 
-    eval_set = build_eval_set(cfg["n_eval"])
-    result["eval_set_hash"] = fingerprint(eval_set)
+    eval_set = build_eval_set(cfg["n_eval"]) if cfg["n_eval"] else []
+    result["eval_set_hash"] = fingerprint(eval_set) if eval_set else None
 
     examples = None
-    if not skip_greedy:
+    if eval_set and not skip_greedy:
         print(f"\n[1/..] Évaluation déterministe sur {len(eval_set)} puzzles")
         greedy = _run_batches(model, tokenizer, eval_set, max_new_tokens, batch_size, do_sample=False)
         result["greedy"], examples = summarize(greedy, eval_set, keep_text=True)
@@ -320,6 +323,14 @@ def run_eval(model, tokenizer, mode="short", tag="", adapter=None, base_model=BA
         result["hard"], _ = summarize(hard_s, hard)
         result["hard_set_hash"] = fingerprint(hard)
 
+        n_hs = cfg.get("n_hard_sampled", 0)
+        if n_hs:
+            sub_h = hard[:n_hs]
+            print(f"[4/..] Puzzles durs, échantillonnage : {len(sub_h)} x {cfg['k']} tirages (T={temperature})")
+            hs = _run_batches(model, tokenizer, sub_h, max_new_tokens, batch_size,
+                              do_sample=True, temperature=temperature, num_return_sequences=cfg["k"])
+            result["hard_sampled"], _ = summarize(hs, sub_h, k=cfg["k"])
+
     result["duration_s"] = round(time.time() - t0)
     print_report(result, examples)
     save(result, out_dir)
@@ -328,10 +339,10 @@ def run_eval(model, tokenizer, mode="short", tag="", adapter=None, base_model=BA
 
 def print_report(r, examples=None):
     g = r.get("greedy")
-    ref = g or r["sampled"]
+    ref = g or r.get("sampled") or r["hard"]
     print("\n" + "=" * 64)
     print(f"mode={r['mode']}  tag={r['tag'] or '-'}  adapter={r['adapter'] or 'aucun (base)'}")
-    print(f"jeu d'éval : {ref['n_puzzles']} puzzles, empreinte {r['eval_set_hash']}")
+    print(f"jeu d'éval : {ref['n_puzzles']} puzzles, empreinte {r['eval_set_hash'] or r.get('hard_set_hash')}")
     print("=" * 64)
 
     def line(name, s):
@@ -347,6 +358,8 @@ def print_report(r, examples=None):
         line(f"éch. T={r.get('temperature', 0.7)}", r["sampled"])
     if "hard" in r:
         line("puzzles durs", r["hard"])
+    if "hard_sampled" in r:
+        line(f"durs T={r.get('temperature', 0.7)}", r["hard_sampled"])
     if g:
         print("\nRépartition des échecs (déterministe) :")
         for st, c in g["stages"].items():
@@ -361,7 +374,7 @@ def save(result, out_dir):
     name = f"{stamp}_{result['mode']}_{result['tag'] or 'run'}.json"
     (out / name).write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
     summary = {k: result[k] for k in ("timestamp", "mode", "tag", "adapter", "eval_set_hash")}
-    main_part = result.get("greedy") or result["sampled"]
+    main_part = result.get("greedy") or result.get("sampled") or result["hard"]
     summary["accuracy"] = round(main_part["accuracy"], 4)
     summary["ci95"] = [round(x, 4) for x in main_part["ci95"]]
     summary["temperature"] = result.get("temperature") if "greedy" not in result else None
